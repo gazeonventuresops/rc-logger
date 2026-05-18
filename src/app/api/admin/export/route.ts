@@ -55,7 +55,7 @@ export async function GET(request: Request) {
     // 3. Output raw node buffer
     const zipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
 
-    return new NextResponse(zipBuffer, {
+    return new NextResponse(zipBuffer as any, {
       status: 200,
       headers: {
         'Content-Type': 'application/zip',
