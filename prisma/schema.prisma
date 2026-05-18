@@ -1,0 +1,74 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum CrateType {
+  PERM
+  COLD
+}
+
+enum SyncStatus {
+  PENDING
+  SYNCED
+  FAILED
+}
+
+model Store {
+  id        String     @id @default(uuid())
+  name      String     @unique
+  location  String?
+  users     User[]
+  logs      CrateLog[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+model User {
+  id           String     @id @default(uuid())
+  username     String     @unique
+  passwordHash String
+  role         Role       @default(USER)
+  storeId      String?    // Nullable for Admins
+  store        Store?     @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  logs         CrateLog[]
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+}
+
+model CrateLog {
+  id             String     @id @default(uuid())
+  userId         String
+  user           User       @relation(fields: [userId], references: [id])
+  storeId        String
+  store          Store      @relation(fields: [storeId], references: [id])
+  crateType      CrateType
+  cratePrefix    String     // Left 6 digits
+  crateSuffix    String     // Right 16 digits
+  fullCrateCode  String     // Re-assembled: 123456)_PERM_(1234567890123456
+  oneDrivePath   String?    // Upload path in OneDrive
+  syncStatus     SyncStatus @default(PENDING)
+  errorMessage   String?    // Tracks sync failures for retries
+  capturedAt     DateTime   @default(now())
+  syncedAt       DateTime?
+}
+
+model OneDriveConfig {
+  id           String   @id @default("singleton_config")
+  clientId     String
+  clientSecret String
+  tenantId     String
+  accessToken  String   @db.Text
+  refreshToken String   @db.Text
+  expiresAt    DateTime
+  updatedAt    DateTime @updatedAt
+}

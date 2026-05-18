@@ -1,0 +1,62 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
+
+:root {
+  /* Pitch Black Visual Palette */
+  --bg-pure-black: #000000;
+  --bg-deep-grey: #08080a;
+  --bg-card: #111114;
+  --bg-card-hover: #16161c;
+  --bg-input: #151518;
+  --border-muted: #24242b;
+  --border-glow: rgba(0, 242, 254, 0.2);
+
+  /* Accents */
+  --accent-cyan: #00f2fe;
+  --accent-green: #00ff87;
+  --accent-red: #ff3366;
+  --accent-yellow: #ffb700;
+
+  /* Typography */
+  --text-primary: #ffffff;
+  --text-secondary: #a0a0b5;
+  --text-muted: #575768;
+
+  /* Effects */
+  --neon-shadow: 0 0 15px rgba(0, 242, 254, 0.25);
+  --green-shadow: 0 0 15px rgba(0, 255, 135, 0.25);
+  --transition-smooth: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-pure-black);
+  color: var(--text-primary);
+  font-family: 'Outfit', sans-serif;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+input, select, button {
+  font-family: inherit;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-pure-black);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-muted);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
