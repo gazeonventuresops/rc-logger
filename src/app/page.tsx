@@ -1,44 +1,68 @@
 'use client';
 
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { db, type LocalLog } from '@/lib/dexie';
-import styles from '@/styles/Home.module.css';
+import {
+  Camera, RotateCcw, Save, LogOut, CheckCircle, AlertCircle,
+  Package2, Shield, FlipHorizontal, CloudUpload,
+  Loader2, X, ChevronDown, Eye, EyeOff, Store
+} from "lucide-react";
 
-export default function UserDashboard() {
+const STORES = [
+  "SS Rajkot Nana Mava ES2",
+  "SS Rajkot KKV Chowk ES4",
+  "SS Rajkot Atika South ES6",
+];
+
+const CRATE_TYPES = ["PERM", "COLD"] as const;
+type CrateType = typeof CRATE_TYPES[number];
+
+const CRATE_TYPE_COLORS: Record<CrateType, string> = {
+  PERM: "#F8CC00",
+  COLD: "#3B82F6",
+};
+
+export default function App() {
   const [session, setSession] = useState<{ username: string; role: string; storeName: string } | null>(null);
-  
+
   // Auth Form
   const [usernameInput, setUsernameInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
+  const [selectedStore, setSelectedStore] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
 
   // Camera & Capture states
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [stream, setStream] = useState<MediaStream | null>(null);
-  const [capturedBlob, setCapturedBlob] = useState<Blob | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [cameraActive, setCameraActive] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
+  const [cameraError, setCameraError] = useState("");
+
+  const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
+  const [capturedAt, setCapturedAt] = useState<Date | null>(null);
 
   // Crate validation states
-  const [cratePrefix, setCratePrefix] = useState(''); // 6 numeric digits
-  const [crateType, setCrateType] = useState<'PERM' | 'COLD'>('PERM');
-  const [crateSuffix, setCrateSuffix] = useState(''); // 16 numeric digits
-  const [validationError, setValidationError] = useState('');
-  const [syncStatusMsg, setSyncStatusMsg] = useState('');
+  const [cratePrefix, setCratePrefix] = useState('');
+  const [crateType, setCrateType] = useState<CrateType>('PERM');
+  const [crateSuffix, setCrateSuffix] = useState('');
+  const [submitError, setSubmitError] = useState('');
+  const [success, setSuccess] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Sync Queue states
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [currentTime, setCurrentTime] = useState(new Date());
 
-  // Check login on load
   useEffect(() => {
     const saved = localStorage.getItem('rc_session');
-    if (saved) {
-      setSession(JSON.parse(saved));
-    }
+    if (saved) setSession(JSON.parse(saved));
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(timer);
   }, []);
 
-  // Update offline sync count
   const updatePendingCount = async () => {
     try {
       const count = await db.localLogs.where('syncStatus').equals('PENDING').count();
@@ -51,7 +75,6 @@ export default function UserDashboard() {
   useEffect(() => {
     if (session) {
       updatePendingCount();
-      startCamera();
       // Listen for online events
       window.addEventListener('online', triggerSyncQueue);
       return () => {
@@ -63,24 +86,30 @@ export default function UserDashboard() {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    const isAdmin = usernameInput.trim().toLowerCase() === "admin";
+    if (!selectedStore && !isAdmin) {
+      setAuthError("Please select your store before logging in.");
+      return;
+    }
     setAuthError('');
+    setAuthLoading(true);
 
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: usernameInput, password: passwordInput }),
+        body: JSON.stringify({ username: usernameInput.trim(), password: passwordInput }),
       });
 
       if (!res.ok) {
         const data = await res.json();
         setAuthError(data.message || 'Login failed.');
+        setAuthLoading(false);
         return;
       }
 
       const data = await res.json();
       if (data.user.role === 'ADMIN') {
-        // Simple client-side redirect for convenience if user is admin
         window.location.href = '/admin';
         return;
       }
@@ -88,13 +117,15 @@ export default function UserDashboard() {
       const userSession = {
         username: data.user.username,
         role: data.user.role,
-        storeName: data.user.store.name,
+        storeName: selectedStore,
       };
 
       localStorage.setItem('rc_session', JSON.stringify(userSession));
       setSession(userSession);
     } catch (err) {
       setAuthError('Connection failed.');
+    } finally {
+      setAuthLoading(false);
     }
   };
 
@@ -104,69 +135,119 @@ export default function UserDashboard() {
     setSession(null);
   };
 
-  const startCamera = async () => {
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setCameraActive(false);
+    setCameraReady(false);
+  }, []);
+
+  const startCamera = useCallback(async (mode?: "environment" | "user") => {
+    const m = mode ?? facingMode;
+    setCameraError("");
     try {
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: m }, width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false,
       });
-      setStream(mediaStream);
-      if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream;
-      }
-    } catch (err) {
-      setValidationError('Direct camera access failed. Please enable permissions.');
+      streamRef.current = stream;
+      setCameraActive(true);
+    } catch (err: any) {
+      setCameraError('Camera access denied or no camera found.');
     }
+  }, [facingMode]);
+
+  useEffect(() => {
+    if (cameraActive && streamRef.current && videoRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().catch(e => setCameraError("Video preview failed."));
+    }
+  }, [cameraActive]);
+
+  const flipCamera = async () => {
+    const m = facingMode === "environment" ? "user" : "environment";
+    setFacingMode(m);
+    await startCamera(m);
   };
 
-  const stopCamera = () => {
-    if (stream) {
-      stream.getTracks().forEach((track) => track.stop());
-      setStream(null);
+  const capturePhoto = () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) { setCameraError("Video not ready."); return; }
+
+    const now = new Date();
+    const fullCrateName = `${cratePrefix}_${crateType}_${crateSuffix}`;
+
+    let w = video.videoWidth, h = video.videoHeight;
+    if (w > 800 || h > 600) {
+      const r = Math.min(800 / w, 600 / h);
+      w = Math.round(w * r); h = Math.round(h * r);
     }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(video, 0, 0, w, h);
+
+    // Overlay Watermark
+    const bannerH = Math.max(72, Math.round(h * 0.16));
+    const pad = 10;
+    ctx.fillStyle = "rgba(0,0,0,0.84)";
+    ctx.fillRect(0, h - bannerH, w, bannerH);
+    ctx.fillStyle = CRATE_TYPE_COLORS[crateType];
+    ctx.fillRect(0, h - bannerH, w, 3);
+    const fs1 = Math.max(14, Math.round(w * 0.026));
+    const fs2 = Math.max(11, Math.round(w * 0.019));
+    const lineH = Math.round(bannerH / 3.2);
+
+    ctx.font = `bold ${fs1}px 'Courier New', monospace`;
+    ctx.fillStyle = CRATE_TYPE_COLORS[crateType];
+    ctx.textAlign = "left";
+    ctx.fillText(fullCrateName, pad, h - bannerH + lineH);
+
+    ctx.fillStyle = crateType === "COLD" ? "#3B82F6" : "#1a1a1a";
+    ctx.fillRect(w - fs1 * 3.2 - pad, h - bannerH + 6, fs1 * 3.2, fs1 + 8);
+    ctx.fillStyle = "#FFFFFF";
+    ctx.font = `bold ${fs2}px 'Courier New', monospace`;
+    ctx.textAlign = "right";
+    ctx.fillText(`[${crateType}]`, w - pad, h - bannerH + lineH + 2);
+
+    ctx.font = `${fs2}px 'Courier New', monospace`;
+    ctx.fillStyle = "#FFFFFF";
+    ctx.textAlign = "left";
+    const ds = now.toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" });
+    const ts = now.toLocaleTimeString("en-IN", { hour12: false });
+    ctx.fillText(`${ds}  ${ts}`, pad, h - bannerH + lineH * 2.1);
+
+    ctx.fillStyle = "#999";
+    ctx.fillText(session!.storeName, pad, h - bannerH + lineH * 3.1);
+    ctx.fillStyle = CRATE_TYPE_COLORS[crateType];
+    ctx.font = `bold ${fs2}px 'Courier New', monospace`;
+    ctx.textAlign = "right";
+    ctx.fillText(`@${session!.username}`, w - pad, h - bannerH + lineH * 3.1);
+
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+    setCapturedPhoto(dataUrl);
+    setCapturedAt(now);
+    stopCamera();
+    setSubmitError("");
   };
 
-  const captureSnapshot = () => {
-    if (videoRef.current && canvasRef.current) {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        
-        canvas.toBlob(
-          (blob) => {
-            if (blob) {
-              setCapturedBlob(blob);
-              setPreviewUrl(URL.createObjectURL(blob));
-              stopCamera();
-            }
-          },
-          'image/jpeg',
-          0.85 // Optimum 15% quality compression
-        );
-      }
-    }
-  };
-
-  const retakeSnapshot = () => {
-    setCapturedBlob(null);
-    setPreviewUrl(null);
-    startCamera();
+  const retake = async () => {
+    setCapturedPhoto(null);
+    setCapturedAt(null);
+    setSubmitError("");
+    await startCamera();
   };
 
   const validateCrateInput = () => {
-    if (!/^\d{6}$/.test(cratePrefix)) {
-      setValidationError('Crate prefix requires exactly 6 numeric digits.');
-      return false;
-    }
-    if (!/^\d{16}$/.test(crateSuffix)) {
-      setValidationError('Crate suffix requires exactly 16 numeric digits.');
-      return false;
-    }
-    setValidationError('');
+    if (!/^\d+$/.test(cratePrefix)) { setSubmitError('Crate prefix requires numeric digits.'); return false; }
+    if (!/^\d+$/.test(crateSuffix)) { setSubmitError('Crate suffix requires numeric digits.'); return false; }
     return true;
   };
 
@@ -175,8 +256,6 @@ export default function UserDashboard() {
     try {
       const pendingItems = await db.localLogs.where('syncStatus').equals('PENDING').toArray();
       if (pendingItems.length === 0) return;
-
-      setSyncStatusMsg(`Restored connection! Syncing ${pendingItems.length} logs...`);
 
       for (const item of pendingItems) {
         const base64Image = await new Promise<string>((resolve) => {
@@ -200,132 +279,122 @@ export default function UserDashboard() {
         if (res.ok) {
           await db.localLogs.update(item.id!, { syncStatus: 'SYNCED' });
         } else {
-          const errData = await res.json();
-          await db.localLogs.update(item.id!, { 
-            syncStatus: 'FAILED',
-            errorMessage: errData.message || 'Sync failed.'
-          });
+          await db.localLogs.update(item.id!, { syncStatus: 'FAILED' });
         }
       }
-
-      setSyncStatusMsg('All pending queues uploaded to OneDrive successfully.');
       updatePendingCount();
-      setTimeout(() => setSyncStatusMsg(''), 3000);
     } catch (e) {
       console.error('Queue sync worker failed: ', e);
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!validateCrateInput() || !capturedBlob) return;
-
+  const submitPhoto = async () => {
+    if (!validateCrateInput() || !capturedPhoto) return;
     setIsSubmitting(true);
-    const logData: LocalLog = {
-      cratePrefix,
-      crateType,
-      crateSuffix,
-      capturedAt: new Date(),
-      imageBlob: capturedBlob,
-      syncStatus: 'PENDING',
-    };
+    setSubmitError("");
 
     try {
-      // 1. Commit transactionally to client local db
+      const response = await fetch(capturedPhoto);
+      const blob = await response.blob();
+
+      const logData: LocalLog = {
+        cratePrefix, crateType, crateSuffix,
+        capturedAt: capturedAt || new Date(),
+        imageBlob: blob,
+        syncStatus: 'PENDING',
+      };
+
       await db.localLogs.add(logData);
       await updatePendingCount();
 
-      // 2. Perform realtime cloud sync if network is operational
       if (navigator.onLine) {
-        setSyncStatusMsg('Network detected. Syncing snapshot to Microsoft OneDrive...');
-        const base64Image = await new Promise<string>((resolve) => {
-          const reader = new FileReader();
-          reader.readAsDataURL(capturedBlob);
-          reader.onloadend = () => resolve(reader.result as string);
-        });
-
-        const response = await fetch('/api/crate-log', {
+        const res = await fetch('/api/crate-log', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            cratePrefix,
-            crateType,
-            crateSuffix,
+            cratePrefix, crateType, crateSuffix,
             capturedAt: logData.capturedAt.toISOString(),
-            imageBuffer: base64Image,
+            imageBuffer: capturedPhoto,
           }),
         });
-
-        if (response.ok) {
-          setSyncStatusMsg('Logs captured and safely uploaded to OneDrive!');
+        if (res.ok) {
           await db.localLogs.where({ cratePrefix, crateSuffix }).modify({ syncStatus: 'SYNCED' });
           updatePendingCount();
-        } else {
-          setSyncStatusMsg('Cloud upload deferred. Log stored in local sync queue.');
         }
-      } else {
-        setSyncStatusMsg('Local buffer complete! Sync will trigger when network is detected.');
       }
 
-      // Reset Form State
+      setSuccess(true);
       setTimeout(() => {
+        setSuccess(false);
         setCratePrefix('');
         setCrateSuffix('');
-        setCapturedBlob(null);
-        setPreviewUrl(null);
-        setSyncStatusMsg('');
-        setIsSubmitting(false);
+        setCapturedPhoto(null);
         startCamera();
       }, 2500);
 
-    } catch (err) {
-      setValidationError('Local database buffering transaction failed.');
+    } catch (err: any) {
+      setSubmitError(`Save failed: ${err.message}`);
+    } finally {
       setIsSubmitting(false);
     }
   };
 
-  // Auth login view
+  // --- Auth Login View ---
   if (!session) {
+    const isAdmin = usernameInput.trim().toLowerCase() === "admin";
     return (
-      <div className={styles.container}>
-        <div style={{ marginTop: '80px', width: '100%' }}>
-          <div className={styles.glassPanel}>
-            <div style={{ textAlign: 'center', marginBottom: '24px' }}>
-              <h1 style={{ fontSize: '1.8rem', color: 'var(--accent-cyan)' }}>RC LOGGER</h1>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '4px' }}>
-                Reverse Consignment Logger System
-              </p>
+      <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center p-4">
+        <div className="absolute inset-0 bg-gradient-to-br from-yellow-400/5 via-transparent to-green-600/5 pointer-events-none" />
+        <div className="relative w-full max-w-sm">
+          <div className="text-center mb-8">
+            <div className="inline-flex items-center justify-center w-20 h-20 bg-yellow-400 rounded-3xl mb-4 shadow-lg shadow-yellow-400/25">
+              <Package2 className="w-10 h-10 text-black" />
             </div>
-            
-            <form onSubmit={handleLogin}>
-              <div className={styles.formGroup}>
-                <label>Username</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="operator_store01"
-                  className={styles.inputField}
-                  value={usernameInput}
-                  onChange={(e) => setUsernameInput(e.target.value)}
+            <h1 className="text-3xl font-black text-white tracking-tight">RC Logger</h1>
+            <p className="text-gray-500 text-sm mt-1 font-medium">Reverse Consignment · Blinkit</p>
+          </div>
+          <div className="bg-[#111] border border-white/10 rounded-2xl p-6 shadow-2xl">
+            <h2 className="text-white font-bold text-lg mb-5">Sign In</h2>
+            {authError && (
+              <div className="flex items-start gap-2.5 bg-red-500/10 border border-red-500/25 rounded-xl p-3 mb-4">
+                <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                <p className="text-red-400 text-sm leading-snug">{authError}</p>
+              </div>
+            )}
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Username</label>
+                <input type="text" value={usernameInput} onChange={(e) => setUsernameInput(e.target.value)} required
+                  className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-yellow-400/60"
                 />
               </div>
-
-              <div className={styles.formGroup}>
-                <label>Password</label>
-                <input
-                  type="password"
-                  required
-                  placeholder="••••••••"
-                  className={styles.inputField}
-                  value={passwordInput}
-                  onChange={(e) => setPasswordInput(e.target.value)}
-                />
+              <div>
+                <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">Password</label>
+                <div className="relative">
+                  <input type={showPassword ? "text" : "password"} value={passwordInput} onChange={(e) => setPasswordInput(e.target.value)} required
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 pr-11 text-white focus:outline-none focus:ring-2 focus:ring-yellow-400/60"
+                  />
+                  <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
-
-              {authError && <div className={styles.error}>{authError}</div>}
-
-              <button type="submit" className={styles.button} style={{ marginTop: '12px' }}>
-                Secure Login
+              <div>
+                <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
+                  <Store className="w-3.5 h-3.5" /> Your Store {!isAdmin && <span className="text-yellow-400">*</span>}
+                </label>
+                <div className="relative">
+                  <select value={selectedStore} onChange={e => setSelectedStore(e.target.value)} required={!isAdmin}
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white appearance-none focus:outline-none focus:ring-2 focus:ring-yellow-400/60 cursor-pointer">
+                    <option value="" className="bg-[#1a1a1a] text-gray-400">Select your store...</option>
+                    {STORES.map(s => <option key={s} value={s} className="bg-[#1a1a1a] text-white">{s}</option>)}
+                  </select>
+                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" />
+                </div>
+              </div>
+              <button type="submit" disabled={authLoading || !usernameInput || !passwordInput || (!selectedStore && !isAdmin)}
+                className="w-full bg-yellow-400 hover:bg-yellow-300 text-black font-black py-3.5 rounded-xl transition-all disabled:opacity-40 mt-2">
+                {authLoading ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : "Sign In"}
               </button>
             </form>
           </div>
@@ -334,109 +403,132 @@ export default function UserDashboard() {
     );
   }
 
-  // Camera intake view
+  // --- Camera Intake View ---
+  const canCapture = cratePrefix.trim().length > 0 && crateSuffix.trim().length > 0;
+  const fullCrateName = canCapture ? `${cratePrefix}_${crateType}_${crateSuffix}` : null;
+  const typeColor = CRATE_TYPE_COLORS[crateType];
+
   return (
-    <div className={styles.container}>
-      <div className={styles.header}>
-        <div>
-          <h1>RC LOGGER</h1>
-          <div style={{ display: 'flex', alignItems: 'center', marginTop: '4px' }}>
-            <span className={styles.badge}>{session.storeName}</span>
-            <button className={styles.logoutBtn} onClick={handleLogout}>Logout</button>
+    <div className="min-h-screen bg-[#0a0a0a] flex flex-col">
+      {/* Header */}
+      <div className="bg-[#111] border-b border-white/10 px-4 py-3 flex items-center justify-between sticky top-0 z-20">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 bg-yellow-400 rounded-lg flex items-center justify-center">
+            <Package2 className="w-4 h-4 text-black" />
+          </div>
+          <div>
+            <p className="text-white font-bold text-sm leading-none">RC Logger</p>
+            <p className="text-gray-500 text-xs leading-none mt-0.5 max-w-[150px] truncate">{session.storeName}</p>
           </div>
         </div>
-        {pendingSyncCount > 0 && (
-          <span 
-            className={styles.badge} 
-            style={{ 
-              background: 'rgba(255, 183, 0, 0.1)', 
-              borderColor: 'var(--accent-yellow)', 
-              color: 'var(--accent-yellow)' 
-            }}
-          >
-            {pendingSyncCount} Pending Sync
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {pendingSyncCount > 0 && (
+            <span className="text-xs bg-yellow-400/15 text-yellow-400 border border-yellow-400/20 px-2 py-1 rounded-full font-semibold">
+              {pendingSyncCount} saved offline
+            </span>
+          )}
+          <button onClick={handleLogout} className="p-2 text-gray-500 hover:text-white transition rounded-lg hover:bg-white/5">
+            <LogOut className="w-4 h-4" />
+          </button>
+        </div>
       </div>
 
-      <div className={styles.cameraContainer}>
-        {!previewUrl ? (
-          <div className={styles.videoWrapper}>
-            <video ref={videoRef} autoPlay playsInline muted className={styles.videoElement} />
-            <button type="button" onClick={captureSnapshot} className={styles.captureBtn}>
-              <div className={styles.captureBtnInner} />
-            </button>
-          </div>
-        ) : (
-          <div className={styles.videoWrapper}>
-            <img src={previewUrl} alt="Captured preview" className={styles.previewImage} />
-            <div className={styles.retakeOverlay}>
-              <button type="button" onClick={retakeSnapshot} className={styles.retakeBtn}>
-                Retake Snapshot
-              </button>
+      <div className="flex-1 overflow-auto pb-8">
+        <div className="max-w-lg mx-auto p-4 space-y-4">
+          {/* Crate Input */}
+          <div>
+            <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1.5">
+              Crate Number <span className="text-yellow-400">*</span>
+            </label>
+            <div className="flex items-stretch gap-2">
+              <input type="tel" value={cratePrefix} onChange={e => setCratePrefix(e.target.value.replace(/\D/g, ""))} placeholder="123456" maxLength={10}
+                className="w-[76px] bg-white/5 border border-white/10 rounded-xl px-3 py-3 text-white text-center text-sm font-mono focus:outline-none focus:ring-2 focus:ring-yellow-400/60" />
+              <div className="relative flex-shrink-0">
+                <select value={crateType} onChange={e => setCrateType(e.target.value as CrateType)}
+                  className="appearance-none h-full rounded-xl px-3 pr-7 py-3 text-sm font-black font-mono border focus:outline-none cursor-pointer"
+                  style={{ backgroundColor: crateType === "PERM" ? "rgba(248,204,0,0.15)" : "rgba(59,130,246,0.15)", borderColor: `${typeColor}55`, color: typeColor }}>
+                  {CRATE_TYPES.map(t => <option key={t} value={t} className="bg-[#1a1a1a]">{t}</option>)}
+                </select>
+                <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none" style={{ color: typeColor }} />
+              </div>
+              <input type="tel" value={crateSuffix} onChange={e => setCrateSuffix(e.target.value.replace(/\D/g, ""))} placeholder="16 DIGITS" maxLength={16}
+                className="flex-1 bg-white/5 border border-white/10 rounded-xl px-3 py-3 text-white text-sm font-mono focus:outline-none focus:ring-2 focus:ring-yellow-400/60" />
             </div>
+            {fullCrateName && (
+              <div className="mt-2 flex items-center gap-1.5 bg-white/5 rounded-lg px-3 py-1.5">
+                <Shield className="w-3 h-3 flex-shrink-0" style={{ color: typeColor }} />
+                <span className="text-xs font-mono text-gray-400">ID: <span className="font-bold" style={{ color: typeColor }}>{fullCrateName}</span></span>
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
-      <form onSubmit={handleSubmit} style={{ width: '100%' }}>
-        <div className={styles.formGroup}>
-          <label>Crate Reference Pattern</label>
-          <div className={styles.inputTemplateRow}>
-            {/* Prefix Blank */}
-            <input
-              type="text"
-              maxLength={6}
-              placeholder="123456"
-              required
-              className={styles.prefixInput}
-              value={cratePrefix}
-              onChange={(e) => setCratePrefix(e.target.value.replace(/\D/g, ''))}
-            />
-            
-            <span className={styles.patternDivider}>)_</span>
+          {success && (
+            <div className="flex items-center gap-2.5 bg-green-500/10 border border-green-500/25 rounded-xl p-3">
+              <CheckCircle className="w-4 h-4 text-green-400 flex-shrink-0" />
+              <p className="text-green-400 text-sm font-medium">Photo logged and queued for cloud sync!</p>
+            </div>
+          )}
+          {(cameraError || submitError) && (
+            <div className="flex items-start gap-2.5 bg-red-500/10 border border-red-500/25 rounded-xl p-3">
+              <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+              <p className="text-red-400 text-sm">{cameraError || submitError}</p>
+            </div>
+          )}
 
-            {/* Type Switcher */}
-            <select
-              className={styles.typeSelector}
-              value={crateType}
-              onChange={(e) => setCrateType(e.target.value as 'PERM' | 'COLD')}
-            >
-              <option value="PERM">PERM</option>
-              <option value="COLD">COLD</option>
-            </select>
-
-            <span className={styles.patternDivider}>_(</span>
-
-            {/* Suffix Blank */}
-            <input
-              type="text"
-              maxLength={16}
-              placeholder="7890123456789012"
-              required
-              className={styles.suffixInput}
-              value={crateSuffix}
-              onChange={(e) => setCrateSuffix(e.target.value.replace(/\D/g, ''))}
-            />
-
-            <span className={styles.patternClosing}>)</span>
+          {/* Camera Box */}
+          <div className="rounded-2xl overflow-hidden border border-white/10 bg-[#111]">
+            {capturedPhoto ? (
+              <div>
+                <div className="relative">
+                  <img src={capturedPhoto} alt="Preview" className="w-full block" />
+                  <div className="absolute top-2 right-2 flex gap-1.5">
+                    <span className="bg-blue-500/80 text-white text-xs px-2 py-1 rounded-lg flex items-center gap-1"><CloudUpload className="w-3 h-3" /> Sync</span>
+                  </div>
+                </div>
+                <div className="flex gap-2 p-3 bg-[#0f0f0f]">
+                  <button onClick={retake} disabled={isSubmitting} className="flex-1 flex justify-center gap-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white py-3 rounded-xl text-sm font-semibold">
+                    <RotateCcw className="w-4 h-4" /> Retake
+                  </button>
+                  <button onClick={submitPhoto} disabled={isSubmitting} className="flex-[2] flex justify-center gap-1.5 bg-yellow-400 hover:bg-yellow-300 text-black font-black py-3 rounded-xl text-sm">
+                    {isSubmitting ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</> : <><Save className="w-4 h-4" /> Submit Photo</>}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <div className={`relative bg-black ${cameraActive ? "block" : "hidden"}`}>
+                  <video ref={videoRef} autoPlay playsInline muted onCanPlay={() => setCameraReady(true)} className="w-full max-h-[65vh] object-cover" />
+                  {cameraReady && (
+                    <div className="absolute bottom-0 left-0 right-0 bg-black/80 px-3 py-2" style={{ borderTop: `2px solid ${typeColor}55` }}>
+                      <p className="font-bold text-xs font-mono" style={{ color: typeColor }}>{fullCrateName || "ENTER CRATE NUMBER"}</p>
+                    </div>
+                  )}
+                  <button onClick={capturePhoto} disabled={!canCapture || !cameraReady}
+                    className="absolute left-1/2 -translate-x-1/2 bottom-[4rem] w-16 h-16 rounded-full flex items-center justify-center border-[3px] border-black disabled:opacity-30 disabled:cursor-not-allowed"
+                    style={{ backgroundColor: typeColor }}><Camera className="w-7 h-7 text-black" />
+                  </button>
+                  <button onClick={flipCamera} className="absolute top-3 right-3 bg-black/50 hover:bg-black/70 text-white p-2 rounded-xl">
+                    <FlipHorizontal className="w-4 h-4" />
+                  </button>
+                </div>
+                {!cameraActive && (
+                  <div className="flex flex-col items-center py-14 px-4 text-center">
+                    <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-4 border border-white/10">
+                      <Camera className="w-9 h-9 text-gray-600" />
+                    </div>
+                    <p className="text-gray-400 text-sm mb-5">{canCapture ? "Ready to capture" : "Enter crate number to enable camera"}</p>
+                    <button onClick={() => startCamera()} disabled={!canCapture}
+                      className="text-black font-black px-8 py-3.5 rounded-xl disabled:opacity-30 transition"
+                      style={{ backgroundColor: canCapture ? typeColor : "#555" }}>
+                      Open Camera
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
-
-        {validationError && <p className={styles.error}>{validationError}</p>}
-        {syncStatusMsg && <p className={styles.successText}>{syncStatusMsg}</p>}
-
-        <button
-          type="submit"
-          className={styles.button}
-          disabled={isSubmitting || !capturedBlob || !!validationError}
-          style={{ marginTop: '16px' }}
-        >
-          {isSubmitting ? 'Processing sync...' : 'Submit Return Log'}
-        </button>
-      </form>
-
-      <canvas ref={canvasRef} style={{ display: 'none' }} />
+      </div>
     </div>
   );
 }
